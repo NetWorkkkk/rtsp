@@ -1,10 +1,13 @@
 from random import randint
+from time import time
 import sys, traceback, threading, socket
 
 from VideoStream import VideoStream
 from RtpPacket import RtpPacket
 
 class ServerWorker:
+	MAX_RTP_PAYLOAD_SIZE = 1400
+
 	SETUP = 'SETUP'
 	PLAY = 'PLAY'
 	PAUSE = 'PAUSE'
@@ -23,6 +26,7 @@ class ServerWorker:
 	
 	def __init__(self, clientInfo):
 		self.clientInfo = clientInfo
+		self.nextRtpSeq = 0
 		
 	def run(self):
 		threading.Thread(target=self.recvRtspRequest).start()
@@ -117,32 +121,44 @@ class ServerWorker:
 				break 
 				
 			data = self.clientInfo['videoStream'].nextFrame()
-			if data: 
-				frameNumber = self.clientInfo['videoStream'].frameNbr()
+			if data:
 				try:
 					address = self.clientInfo['rtspSocket'][1][0]
 					port = int(self.clientInfo['rtpPort'])
-					self.clientInfo['rtpSocket'].sendto(self.makeRtp(data, frameNumber),(address,port))
+					frameTimestamp = int(time() * 90000) & 0xFFFFFFFF
+					for packet in self.fragmentFrame(data, frameTimestamp):
+						self.clientInfo['rtpSocket'].sendto(packet, (address, port))
 				except:
 					print("Connection Error")
 					#print('-'*60)
 					#traceback.print_exc(file=sys.stdout)
 					#print('-'*60)
 
-	def makeRtp(self, payload, frameNbr):
+	def fragmentFrame(self, frameData, frameTimestamp):
+		"""Split one encoded frame into MTU-safe RTP payload fragments."""
+		packets = []
+		total = len(frameData)
+		offset = 0
+		while offset < total:
+			chunk = frameData[offset:offset + self.MAX_RTP_PAYLOAD_SIZE]
+			offset += len(chunk)
+			marker = 1 if offset >= total else 0
+			packets.append(self.makeRtp(chunk, self.nextRtpSeq, marker, frameTimestamp))
+			self.nextRtpSeq = (self.nextRtpSeq + 1) & 0xFFFF
+		return packets
+
+	def makeRtp(self, payload, seqnum, marker, timestamp):
 		"""RTP-packetize the video data."""
 		version = 2
 		padding = 0
 		extension = 0
 		cc = 0
-		marker = 0
 		pt = 26 # MJPEG type
-		seqnum = frameNbr
 		ssrc = 0 
 		
 		rtpPacket = RtpPacket()
 		
-		rtpPacket.encode(version, padding, extension, cc, seqnum, marker, pt, ssrc, payload)
+		rtpPacket.encode(version, padding, extension, cc, seqnum, marker, pt, ssrc, payload, timestamp)
 		
 		return rtpPacket.getPacket()
 		

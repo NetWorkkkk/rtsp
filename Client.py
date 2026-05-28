@@ -34,6 +34,9 @@ class Client:
 		self.teardownAcked = 0
 		self.connectToServer()
 		self.frameNbr = 0
+		self.currentFrameTimestamp = -1
+		self.currentFrameData = bytearray()
+		self.expectedSeqNum = -1
 		
 	def createWidgets(self):
 		"""Build GUI."""
@@ -94,17 +97,39 @@ class Client:
 		"""Listen for RTP packets."""
 		while True:
 			try:
-				data = self.rtpSocket.recv(20480)
+				data = self.rtpSocket.recv(65536)
 				if data:
 					rtpPacket = RtpPacket()
 					rtpPacket.decode(data)
 					
-					currFrameNbr = rtpPacket.seqNum()
-					print("Current Seq Num: " + str(currFrameNbr))
-										
-					if currFrameNbr > self.frameNbr: # Discard the late packet
-						self.frameNbr = currFrameNbr
-						self.updateMovie(self.writeFrame(rtpPacket.getPayload()))
+					seqNum = rtpPacket.seqNum()
+					timestamp = rtpPacket.timestamp()
+					marker = rtpPacket.marker()
+					payload = rtpPacket.getPayload()
+
+					# New frame starts when RTP timestamp changes.
+					if self.currentFrameTimestamp < timestamp:
+						self.currentFrameTimestamp = timestamp
+						self.currentFrameData = bytearray()
+						self.expectedSeqNum = seqNum
+
+					if self.currentFrameTimestamp > timestamp:
+						# Old frame, already displayed. Ignore it.
+						continue
+				
+					if seqNum != self.expectedSeqNum:
+						continue
+
+					self.currentFrameData.extend(payload)
+					self.expectedSeqNum = (seqNum + 1) & 0xFFFF
+
+					# Marker=1 means this is the last fragment of current frame.
+					if marker == 1 and len(self.currentFrameData) > 0:
+						self.frameNbr += 1
+						self.updateMovie(self.writeFrame(bytes(self.currentFrameData)))
+						self.currentFrameTimestamp = -1
+						self.currentFrameData = bytearray()
+						self.expectedSeqNum = -1
 			except:
 				# Stop listening upon requesting PAUSE or TEARDOWN
 				if self.playEvent.isSet(): 
