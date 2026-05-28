@@ -118,6 +118,22 @@ class ServerWorker:
 				self.clientInfo['rtpPort'] = int(request[2].split(' ')[3])
 				self.clientInfo['rtpSocketHandler'] = socketTCPHandler() if self.clientInfo['rtpProtocol'] == "TCP" else socketUDPHandler()
 			
+			elif self.state == self.READY:
+				# Update state
+				print("processing SETUP\n")
+				self.state = self.READY
+				
+				# Send RTSP reply
+				self.replyRtsp(self.OK_200, seq[1])
+			
+			elif self.state == self.PLAYING:
+				# Update state
+				print("processing SETUP\n")
+				self.state = self.READY
+				
+				# Send RTSP reply
+				self.replyRtsp(self.OK_200, seq[1])
+
 		# Process PLAY request 		
 		elif requestType == self.PLAY:
 			if self.state == self.READY:

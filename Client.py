@@ -289,6 +289,10 @@ class Client:
 		self.transport = "TCP" if selectedMode == "HD" else "UDP"
 		self.statusLabel.configure(text=f"Mode: {selectedMode} | Transport: {self.transport}")
 		# TODO: Add behavior here, e.g. switch transport/profile before SETUP.
+		if self.state == self.INIT:
+			# Do nothing, the transport will be used in the upcoming SETUP request.
+			return
+		self.sendRtspRequest(self.SETUP)
 	
 	def exitClient(self):
 		"""Teardown button handler."""
