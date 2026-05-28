@@ -37,38 +37,177 @@ class Client:
 		
 	def createWidgets(self):
 		"""Build GUI."""
-		# Create Setup button
-		self.setup = Button(self.master, width=20, padx=3, pady=3)
-		self.setup["text"] = "Setup"
-		self.setup["command"] = self.setupMovie
-		self.setup.grid(row=1, column=0, padx=2, pady=2)
+		self.qualityMode = StringVar(value="SD")
+		bg_main = "#f4f6f8"
+		bg_panel = "#ffffff"
+		text_main = "#1f2937"
+		text_muted = "#475569"
+		primary = "#0a9396"
+		primary_dark = "#005f73"
+		accent = "#e9f5f5"
+		warn = "#bb3e03"
+
+		self.master.configure(bg=bg_main, padx=12, pady=12)
+		self.master.grid_rowconfigure(0, weight=1)
+		self.master.grid_columnconfigure(0, weight=1)
+
+		# Video area
+		self.videoFrame = Frame(self.master, bg=bg_panel, bd=1, relief=RIDGE)
+		self.videoFrame.grid(row=0, column=0, sticky=N+S+E+W)
+		self.videoFrame.grid_rowconfigure(0, weight=1)
+		self.videoFrame.grid_columnconfigure(0, weight=1)
+
+		self.label = Label(
+			self.videoFrame,
+			height=19,
+			bg="white",
+			fg="#dbeafe",
+			text="No video stream yet",
+			font=("Trebuchet MS", 12, "bold")
+		)
+		self.label.grid(row=0, column=0, sticky=N+S+E+W, padx=8, pady=8)
+
+		# Control bar
+		self.controlsFrame = Frame(self.master, bg=bg_main)
+		self.controlsFrame.grid(row=1, column=0, sticky=E+W, pady=(10, 0))
+		for i in range(4):
+			self.controlsFrame.grid_columnconfigure(i, weight=1)
+
+		btn_font = ("Trebuchet MS", 11, "bold")
+		self.setup = Button(
+			self.controlsFrame,
+			text="Setup",
+			command=self.setupMovie,
+			font=btn_font,
+			bg=primary,
+			fg="white",
+			activebackground=primary_dark,
+			activeforeground="white",
+			bd=0,
+			padx=10,
+			pady=8
+		)
+		self.setup.grid(row=0, column=0, sticky=E+W, padx=(0, 6))
+
+		self.start = Button(
+			self.controlsFrame,
+			text="Play",
+			command=self.playMovie,
+			font=btn_font,
+			bg=primary,
+			fg="white",
+			activebackground=primary_dark,
+			activeforeground="white",
+			bd=0,
+			padx=10,
+			pady=8
+		)
+		self.start.grid(row=0, column=1, sticky=E+W, padx=6)
+
+		self.pause = Button(
+			self.controlsFrame,
+			text="Pause",
+			command=self.pauseMovie,
+			font=btn_font,
+			bg="#94a3b8",
+			fg="white",
+			activebackground="#64748b",
+			activeforeground="white",
+			bd=0,
+			padx=10,
+			pady=8
+		)
+		self.pause.grid(row=0, column=2, sticky=E+W, padx=6)
+
+		self.teardown = Button(
+			self.controlsFrame,
+			text="Teardown",
+			command=self.exitClient,
+			font=btn_font,
+			bg=warn,
+			fg="white",
+			activebackground="#9a3412",
+			activeforeground="white",
+			bd=0,
+			padx=10,
+			pady=8
+		)
+		self.teardown.grid(row=0, column=3, sticky=E+W, padx=(6, 0))
+
+		# Footer: quality selector + status
+		self.footerFrame = Frame(self.master, bg=bg_main)
+		self.footerFrame.grid(row=2, column=0, sticky=E+W, pady=(10, 0))
+		self.footerFrame.grid_columnconfigure(0, weight=0)
+		self.footerFrame.grid_columnconfigure(1, weight=1)
+
+		self.qualityFrame = LabelFrame(
+			self.footerFrame,
+			text="Streaming Quality",
+			font=("Trebuchet MS", 10, "bold"),
+			bg=bg_panel,
+			fg=text_main,
+			padx=8,
+			pady=6,
+			bd=1,
+			relief=RIDGE
+		)
+		self.qualityFrame.grid(row=0, column=0, sticky=W)
+
+		self.sdRadio = Radiobutton(
+			self.qualityFrame,
+			text="SD",
+			variable=self.qualityMode,
+			value="SD",
+			command=self.onQualityModeChanged,
+			indicatoron=False,
+			font=("Trebuchet MS", 10, "bold"),
+			bg=accent,
+			fg=text_main,
+			selectcolor=primary,
+			activebackground=accent,
+			padx=14,
+			pady=4
+		)
+		self.sdRadio.grid(row=0, column=0, padx=(0, 6), pady=2, sticky=W)
+
+		self.hdRadio = Radiobutton(
+			self.qualityFrame,
+			text="HD",
+			variable=self.qualityMode,
+			value="HD",
+			command=self.onQualityModeChanged,
+			indicatoron=False,
+			font=("Trebuchet MS", 10, "bold"),
+			bg=accent,
+			fg=text_main,
+			selectcolor=primary,
+			activebackground=accent,
+			padx=14,
+			pady=4
+		)
+		self.hdRadio.grid(row=0, column=1, padx=(0, 2), pady=2, sticky=W)
+
+		self.statusLabel = Label(
+			self.footerFrame,
+			text="Mode: SD | Transport: UDP",
+			bg=bg_main,
+			fg=text_muted,
+			font=("Trebuchet MS", 10)
+		)
+		self.statusLabel.grid(row=0, column=1, sticky=E, padx=(12, 0))
 		
-		# Create Play button		
-		self.start = Button(self.master, width=20, padx=3, pady=3)
-		self.start["text"] = "Play"
-		self.start["command"] = self.playMovie
-		self.start.grid(row=1, column=1, padx=2, pady=2)
-		
-		# Create Pause button			
-		self.pause = Button(self.master, width=20, padx=3, pady=3)
-		self.pause["text"] = "Pause"
-		self.pause["command"] = self.pauseMovie
-		self.pause.grid(row=1, column=2, padx=2, pady=2)
-		
-		# Create Teardown button
-		self.teardown = Button(self.master, width=20, padx=3, pady=3)
-		self.teardown["text"] = "Teardown"
-		self.teardown["command"] =  self.exitClient
-		self.teardown.grid(row=1, column=3, padx=2, pady=2)
-		
-		# Create a label to display the movie
-		self.label = Label(self.master, height=19)
-		self.label.grid(row=0, column=0, columnspan=4, sticky=W+E+N+S, padx=5, pady=5) 
-	
 	def setupMovie(self):
 		"""Setup button handler."""
 		if self.state == self.INIT:
 			self.sendRtspRequest(self.SETUP)
+
+	def onQualityModeChanged(self):
+		"""Sample handler: called whenever SD/HD radio selection changes."""
+		selectedMode = self.qualityMode.get()
+		print("Selected streaming quality:", selectedMode)
+		transport = "TCP" if selectedMode == "HD" else "UDP"
+		self.statusLabel.configure(text=f"Mode: {selectedMode} | Transport: {transport}")
+		# TODO: Add behavior here, e.g. switch transport/profile before SETUP.
 	
 	def exitClient(self):
 		"""Teardown button handler."""
