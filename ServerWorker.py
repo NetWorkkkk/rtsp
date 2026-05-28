@@ -4,6 +4,62 @@ import sys, traceback, threading, socket
 from VideoStream import VideoStream
 from RtpPacket import RtpPacket
 
+
+class socketBaseHandler:
+	"""Base class for media transport handlers."""
+
+	def __init__(self):
+		self.sock = None
+
+	def initSocket(self, address, port):
+		raise NotImplementedError
+
+	def sendData(self, data):
+		raise NotImplementedError
+
+	def destroy(self):
+		if self.sock is not None:
+			try:
+				self.sock.close()
+			except OSError:
+				pass
+			self.sock = None
+
+
+class socketUDPHandler(socketBaseHandler):
+	"""Send media packets over UDP."""
+
+	def __init__(self):
+		super().__init__()
+		self.remote = None
+
+	def initSocket(self, address, port):
+		self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+		self.remote = (address, int(port))
+
+	def sendData(self, data):
+		if self.sock is None or self.remote is None:
+			raise RuntimeError("UDP socket handler is not initialized")
+		self.sock.sendto(data, self.remote)
+
+	def destroy(self):
+		self.remote = None
+		super().destroy()
+
+
+class socketTCPHandler(socketBaseHandler):
+	"""Send media packets over TCP."""
+
+	def initSocket(self, address, port):
+		self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+		self.sock.connect((address, int(port)))
+
+	def sendData(self, data):
+		if self.sock is None:
+			raise RuntimeError("TCP socket handler is not initialized")
+		self.sock.sendall(data)
+
+
 class ServerWorker:
 	SETUP = 'SETUP'
 	PLAY = 'PLAY'
@@ -56,9 +112,12 @@ class ServerWorker:
 				# Send RTSP reply
 				self.replyRtsp(self.OK_200, seq[1])
 
-				# Get the RTP/UDP port from the last line
-				self.clientInfo['rtpPort'] = request[2].split(' ')[3]
-		
+				# Get selected media transport (UDP/TCP) and client RTP port.
+				transport = request[2].split(';')[0].upper()
+				self.clientInfo['rtpProtocol'] = "TCP" if "TCP" in transport else "UDP"
+				self.clientInfo['rtpPort'] = int(request[2].split(' ')[3])
+				self.clientInfo['rtpSocketHandler'] = socketTCPHandler() if self.clientInfo['rtpProtocol'] == "TCP" else socketUDPHandler()
+			
 		# Process PLAY request 		
 		elif requestType == self.PLAY:
 			if self.state == self.READY:
@@ -66,7 +125,13 @@ class ServerWorker:
 				self.state = self.PLAYING
 				
 				# Create a new socket for RTP/UDP
-				self.clientInfo["rtpSocket"] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+				address = self.clientInfo['rtspSocket'][1][0]
+				port = self.clientInfo['rtpPort']
+				try:
+					self.clientInfo['rtpSocketHandler'].initSocket(address, port)
+				except:
+					self.replyRtsp(self.CON_ERR_500, seq[1])
+					return False
 				
 				self.replyRtsp(self.OK_200, seq[1])
 				
@@ -76,7 +141,7 @@ class ServerWorker:
 				self.clientInfo['worker'].start()
 		
 		# Process PAUSE request
-		elif requestType == self.PAUSE:	
+		elif requestType == self.PAUSE:
 			if self.state == self.PLAYING:
 				print("processing PAUSE\n")
 				self.state = self.READY
@@ -94,8 +159,8 @@ class ServerWorker:
 			self.replyRtsp(self.OK_200, seq[1])
 			
 			# Close the RTP socket
-			if 'rtpSocket' in self.clientInfo:
-				self.clientInfo['rtpSocket'].close()
+			if 'rtpSocketHandler' in self.clientInfo:
+				self.clientInfo['rtpSocketHandler'].destroy()
 			shouldKeepAlive = False
 		return shouldKeepAlive
 			
@@ -112,9 +177,7 @@ class ServerWorker:
 			if data: 
 				frameNumber = self.clientInfo['videoStream'].frameNbr()
 				try:
-					address = self.clientInfo['rtspSocket'][1][0]
-					port = int(self.clientInfo['rtpPort'])
-					self.clientInfo['rtpSocket'].sendto(self.makeRtp(data, frameNumber),(address,port))
+					self.clientInfo['rtpSocketHandler'].sendData(self.makeRtp(data, frameNumber))
 				except:
 					print("Connection Error")
 					#print('-'*60)
@@ -156,8 +219,8 @@ class ServerWorker:
 		"""Release session resources."""
 		if 'event' in self.clientInfo:
 			self.clientInfo['event'].set()
-		if 'rtpSocket' in self.clientInfo:
+		if 'rtpSocketHandler' in self.clientInfo:
 			try:
-				self.clientInfo['rtpSocket'].close()
+				self.clientInfo['rtpSocketHandler'].destroy()
 			except OSError:
 				pass

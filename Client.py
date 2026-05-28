@@ -8,6 +8,85 @@ from RtpPacket import RtpPacket
 CACHE_FILE_NAME = "cache-"
 CACHE_FILE_EXT = ".jpg"
 
+
+class socketBaseHandler:
+	"""Base class for media receive socket handlers."""
+
+	def initSocket(self, port):
+		raise NotImplementedError
+
+	def recvData(self, max_size):
+		raise NotImplementedError
+
+	def destroy(self):
+		raise NotImplementedError
+
+
+class socketUDPHandler(socketBaseHandler):
+	"""Receive media packets over UDP."""
+
+	def __init__(self):
+		self.sock = None
+
+	def initSocket(self, port):
+		self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+		self.sock.settimeout(0.5)
+		self.sock.bind(('', int(port)))
+
+	def recvData(self, max_size):
+		if self.sock is None:
+			raise RuntimeError("UDP socket handler is not initialized")
+		return self.sock.recv(max_size)
+
+	def destroy(self):
+		if self.sock is not None:
+			try:
+				self.sock.close()
+			except OSError:
+				pass
+			self.sock = None
+
+
+class socketTCPHandler(socketBaseHandler):
+	"""Receive media packets over TCP (server connects to client RTP port)."""
+
+	def __init__(self):
+		self.listen_sock = None
+		self.conn_sock = None
+
+	def initSocket(self, port):
+		self.listen_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+		self.listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+		self.listen_sock.bind(('', int(port)))
+		self.listen_sock.listen(1)
+		self.listen_sock.settimeout(0.5)
+
+	def recvData(self, max_size):
+		if self.listen_sock is None:
+			raise RuntimeError("TCP socket handler is not initialized")
+		if self.conn_sock is None:
+			self.conn_sock, _ = self.listen_sock.accept()
+			self.conn_sock.settimeout(0.5)
+		data = self.conn_sock.recv(max_size)
+		if not data:
+			raise OSError("TCP media connection closed")
+		return data
+
+	def destroy(self):
+		if self.conn_sock is not None:
+			try:
+				self.conn_sock.close()
+			except OSError:
+				pass
+			self.conn_sock = None
+		if self.listen_sock is not None:
+			try:
+				self.listen_sock.close()
+			except OSError:
+				pass
+			self.listen_sock = None
+
+
 class Client:
 	INIT = 0
 	READY = 1
@@ -34,6 +113,8 @@ class Client:
 		self.teardownAcked = 0
 		self.connectToServer()
 		self.frameNbr = 0
+		self.transport = "UDP"
+		self.rtpSocketHandler = None
 		
 	def createWidgets(self):
 		"""Build GUI."""
@@ -205,8 +286,8 @@ class Client:
 		"""Sample handler: called whenever SD/HD radio selection changes."""
 		selectedMode = self.qualityMode.get()
 		print("Selected streaming quality:", selectedMode)
-		transport = "TCP" if selectedMode == "HD" else "UDP"
-		self.statusLabel.configure(text=f"Mode: {selectedMode} | Transport: {transport}")
+		self.transport = "TCP" if selectedMode == "HD" else "UDP"
+		self.statusLabel.configure(text=f"Mode: {selectedMode} | Transport: {self.transport}")
 		# TODO: Add behavior here, e.g. switch transport/profile before SETUP.
 	
 	def exitClient(self):
@@ -233,7 +314,7 @@ class Client:
 		"""Listen for RTP packets."""
 		while True:
 			try:
-				data = self.rtpSocket.recv(20480)
+				data = self.rtpSocketHandler.recvData(20480)
 				if data:
 					rtpPacket = RtpPacket()
 					rtpPacket.decode(data)
@@ -249,13 +330,13 @@ class Client:
 				if self.playEvent.isSet(): 
 					break
 				
-				# Upon receiving ACK for TEARDOWN request,
-				# close the RTP socket
-				if self.teardownAcked == 1:
-					### comment out the shutdown as UDP socket doesn't connect
-					# self.rtpSocket.shutdown(socket.SHUT_RDWR)
-					self.rtpSocket.close()
-					break
+					# Upon receiving ACK for TEARDOWN request,
+					# close the RTP socket
+					if self.teardownAcked == 1:
+						if self.rtpSocketHandler is not None:
+							self.rtpSocketHandler.destroy()
+							self.rtpSocketHandler = None
+						break
 					
 	def writeFrame(self, data):
 		"""Write the received frame to a temp image file. Return the image file."""
@@ -292,7 +373,7 @@ class Client:
 			request = (
 				f"SETUP {self.fileName} RTSP/1.0\n"
 				f"CSeq: {self.rtspSeq}\n"
-				f"Transport: RTP/UDP; client_port= {self.rtpPort}"
+				f"Transport: RTP/{self.transport}; client_port= {self.rtpPort}"
 			)
 			
 			# Keep track of the sent request.
@@ -400,18 +481,9 @@ class Client:
 	
 	def openRtpPort(self):
 		"""Open RTP socket binded to a specified port."""
-		#-------------
-		# TO COMPLETE
-		#-------------
-		# Create a new datagram socket to receive RTP packets from the server
-		self.rtpSocket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-		
-		# Set the timeout value of the socket to 0.5sec
-		self.rtpSocket.settimeout(0.5)
-		
 		try:
-			# Bind the socket to the address using the RTP port given by the client user
-			self.rtpSocket.bind(('', self.rtpPort))
+			self.rtpSocketHandler = socketTCPHandler() if self.transport == "TCP" else socketUDPHandler()
+			self.rtpSocketHandler.initSocket(self.rtpPort)
 		except:
 			tkMessageBox.showwarning('Unable to Bind', 'Unable to bind PORT=%d' %self.rtpPort)
 
