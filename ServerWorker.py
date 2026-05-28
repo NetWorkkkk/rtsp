@@ -24,20 +24,9 @@ class ServerWorker:
 	def __init__(self, clientInfo):
 		self.clientInfo = clientInfo
 		
-	def run(self):
-		threading.Thread(target=self.recvRtspRequest).start()
-	
-	def recvRtspRequest(self):
-		"""Receive RTSP request from the client."""
-		connSocket = self.clientInfo['rtspSocket'][0]
-		while True:            
-			data = connSocket.recv(256)
-			if data:
-				print("Data received:\n" + data.decode("utf-8"))
-				self.processRtspRequest(data.decode("utf-8"))
-	
 	def processRtspRequest(self, data):
 		"""Process RTSP request sent from the client."""
+		shouldKeepAlive = True
 		# Get the request type
 		request = data.split('\n')
 		line1 = request[0].split(' ')
@@ -99,13 +88,16 @@ class ServerWorker:
 		# Process TEARDOWN request
 		elif requestType == self.TEARDOWN:
 			print("processing TEARDOWN\n")
-			### undefined if state chua bao gio PLAYING (tuc la INIT, hoac READY lan dau tien)
-			self.clientInfo['event'].set()
+			if 'event' in self.clientInfo:
+				self.clientInfo['event'].set()
 			
 			self.replyRtsp(self.OK_200, seq[1])
 			
 			# Close the RTP socket
-			self.clientInfo['rtpSocket'].close()
+			if 'rtpSocket' in self.clientInfo:
+				self.clientInfo['rtpSocket'].close()
+			shouldKeepAlive = False
+		return shouldKeepAlive
 			
 	def sendRtp(self):
 		"""Send RTP packets over UDP."""
@@ -159,3 +151,13 @@ class ServerWorker:
 			print("404 NOT FOUND")
 		elif code == self.CON_ERR_500:
 			print("500 CONNECTION ERROR")
+
+	def close(self):
+		"""Release session resources."""
+		if 'event' in self.clientInfo:
+			self.clientInfo['event'].set()
+		if 'rtpSocket' in self.clientInfo:
+			try:
+				self.clientInfo['rtpSocket'].close()
+			except OSError:
+				pass
