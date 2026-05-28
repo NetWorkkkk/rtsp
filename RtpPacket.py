@@ -13,17 +13,26 @@ class RtpPacket:
 		timestamp = int(time())	
 		header = bytearray(HEADER_SIZE)
 		
-		# chi quan tam seqnum va payload (data cua frame)
-		#--------------
-		# TO COMPLETE
-		#--------------
 		# Fill the header bytearray with RTP header fields
+		header[0] = ((version & 0x03) << 6) | ((padding & 0x01) << 5) | ((extension & 0x01) << 4) | (cc & 0x0F)
+		header[1] = ((marker & 0x01) << 7) | (pt & 0x7F)
 		
-		# header[0] = ...
-		# ...
-		
+		header[2] = (seqnum >> 8) & 0xFF
+		header[3] = seqnum & 0xFF
+
+		header[4] = (timestamp >> 24) & 0xFF
+		header[5] = (timestamp >> 16) & 0xFF
+		header[6] = (timestamp >> 8) & 0xFF
+		header[7] = timestamp & 0xFF
+
+		header[8] = (ssrc >> 24) & 0xFF
+		header[9] = (ssrc >> 16) & 0xFF
+		header[10] = (ssrc >> 8) & 0xFF
+		header[11] = ssrc & 0xFF
+
+		self.header = header
 		# Get the payload from the argument
-		self.payload = b'a'*0x100
+		self.payload = payload
 		
 	def decode(self, byteStream):
 		"""Decode the RTP packet."""
@@ -48,6 +57,27 @@ class RtpPacket:
 		"""Return payload type."""
 		pt = self.header[1] & 127
 		return int(pt)
+
+	def padding(self):
+		"""Return padding flag."""
+		return int((self.header[0] >> 5) & 0x01)
+
+	def extension(self):
+		"""Return extension flag."""
+		return int((self.header[0] >> 4) & 0x01)
+
+	def cc(self):
+		"""Return CSRC count."""
+		return int(self.header[0] & 0x0F)
+
+	def marker(self):
+		"""Return marker bit."""
+		return int((self.header[1] >> 7) & 0x01)
+
+	def ssrc(self):
+		"""Return synchronization source identifier."""
+		ssrc = self.header[8] << 24 | self.header[9] << 16 | self.header[10] << 8 | self.header[11]
+		return int(ssrc)
 	
 	def getPayload(self):
 		"""Return payload."""
