@@ -34,6 +34,7 @@ class socketUDPHandler(socketBaseHandler):
 		self.remote = None
 
 	def initSocket(self, address, port):
+		self.destroy()
 		self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 		self.remote = (address, int(port))
 
@@ -50,14 +51,28 @@ class socketUDPHandler(socketBaseHandler):
 class socketTCPHandler(socketBaseHandler):
 	"""Send media packets over TCP."""
 
+	def __init__(self):
+		super().__init__()
+		self.remote = None
+
 	def initSocket(self, address, port):
-		self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-		self.sock.connect((address, int(port)))
+		self.destroy()
+		self.remote = (address, int(port))
+
+	def _connect(self):
+		if self.remote is None:
+			raise RuntimeError("TCP socket handler has no remote endpoint")
+		if self.sock is None:
+			self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+			self.sock.connect(self.remote)
 
 	def sendData(self, data):
-		if self.sock is None:
-			raise RuntimeError("TCP socket handler is not initialized")
+		self._connect()
 		self.sock.sendall(data)
+
+	def destroy(self):
+		self.remote = None
+		super().destroy()
 
 
 class ServerWorker:
@@ -79,6 +94,32 @@ class ServerWorker:
 	
 	def __init__(self, clientInfo):
 		self.clientInfo = clientInfo
+
+	def _stop_streaming(self):
+		"""Stop current RTP sender thread if running."""
+		event = self.clientInfo.get('event')
+		if event is not None:
+			event.set()
+		worker = self.clientInfo.get('worker')
+		if worker is not None and worker.is_alive():
+			worker.join(timeout=0.2)
+		self.clientInfo.pop('event', None)
+		self.clientInfo.pop('worker', None)
+
+	def _recreate_media_handler(self, transport, address, port):
+		"""Tear down old media handler and create a new one for requested transport."""
+		old_handler = self.clientInfo.pop('rtpSocketHandler', None)
+		if old_handler is not None:
+			old_handler.destroy()
+		new_handler = socketTCPHandler() if transport == "TCP" else socketUDPHandler()
+		new_handler.initSocket(address, port)
+		self.clientInfo['rtpSocketHandler'] = new_handler
+
+	def _start_streaming_worker(self):
+		"""Start RTP sender worker thread."""
+		self.clientInfo['event'] = threading.Event()
+		self.clientInfo['worker'] = threading.Thread(target=self.sendRtp)
+		self.clientInfo['worker'].start()
 		
 	def processRtspRequest(self, data):
 		"""Process RTSP request sent from the client."""
@@ -96,65 +137,50 @@ class ServerWorker:
 		
 		# Process SETUP request
 		if requestType == self.SETUP:
+			print("processing SETUP\n")
+			# Parse selected media transport (UDP/TCP) and client RTP port.
+			transport_header = request[2].split(';')[0].upper()
+			self.clientInfo['rtpProtocol'] = "TCP" if "TCP" in transport_header else "UDP"
+			self.clientInfo['rtpPort'] = int(request[2].split(' ')[3])
+
+			address = self.clientInfo['rtspSocket'][1][0]
+			port = self.clientInfo['rtpPort']
+
+			was_playing = (self.state == self.PLAYING)
+			if was_playing:
+				self._stop_streaming()
+
 			if self.state == self.INIT:
-				# Update state
-				print("processing SETUP\n")
-				
 				try:
 					self.clientInfo['videoStream'] = VideoStream(filename)
-					self.state = self.READY
 				except IOError:
 					self.replyRtsp(self.FILE_NOT_FOUND_404, seq[1])
-				### lo client session id trung nhau thi sao huuhhu
-				# Generate a randomized RTSP session ID
+					return shouldKeepAlive
 				self.clientInfo['session'] = randint(100000, 999999)
-				
-				# Send RTSP reply
-				self.replyRtsp(self.OK_200, seq[1])
 
-				# Get selected media transport (UDP/TCP) and client RTP port.
-				transport = request[2].split(';')[0].upper()
-				self.clientInfo['rtpProtocol'] = "TCP" if "TCP" in transport else "UDP"
-				self.clientInfo['rtpPort'] = int(request[2].split(' ')[3])
-				self.clientInfo['rtpSocketHandler'] = socketTCPHandler() if self.clientInfo['rtpProtocol'] == "TCP" else socketUDPHandler()
-			
-			elif self.state == self.READY:
-				# Update state
-				print("processing SETUP\n")
-				self.state = self.READY
-				
-				# Send RTSP reply
-				self.replyRtsp(self.OK_200, seq[1])
-			
-			elif self.state == self.PLAYING:
-				# Update state
-				print("processing SETUP\n")
-				self.state = self.READY
-				
-				# Send RTSP reply
-				self.replyRtsp(self.OK_200, seq[1])
+			try:
+				self._recreate_media_handler(self.clientInfo['rtpProtocol'], address, port)
+			except:
+				self.replyRtsp(self.CON_ERR_500, seq[1])
+				return shouldKeepAlive
+
+			# INIT -> READY, READY stays READY, PLAYING resumes PLAYING.
+			self.state = self.PLAYING if was_playing else self.READY
+
+			if was_playing:
+				self._start_streaming_worker()
+
+			self.replyRtsp(self.OK_200, seq[1])
 
 		# Process PLAY request 		
 		elif requestType == self.PLAY:
 			if self.state == self.READY:
 				print("processing PLAY\n")
 				self.state = self.PLAYING
-				
-				# Create a new socket for RTP/UDP
-				address = self.clientInfo['rtspSocket'][1][0]
-				port = self.clientInfo['rtpPort']
-				try:
-					self.clientInfo['rtpSocketHandler'].initSocket(address, port)
-				except:
-					self.replyRtsp(self.CON_ERR_500, seq[1])
-					return False
-				
 				self.replyRtsp(self.OK_200, seq[1])
 				
 				# Create a new thread and start sending RTP packets
-				self.clientInfo['event'] = threading.Event()
-				self.clientInfo['worker']= threading.Thread(target=self.sendRtp) 
-				self.clientInfo['worker'].start()
+				self._start_streaming_worker()
 		
 		# Process PAUSE request
 		elif requestType == self.PAUSE:
@@ -162,21 +188,21 @@ class ServerWorker:
 				print("processing PAUSE\n")
 				self.state = self.READY
 				
-				self.clientInfo['event'].set()
+				self._stop_streaming()
 			
 				self.replyRtsp(self.OK_200, seq[1])
 		
 		# Process TEARDOWN request
 		elif requestType == self.TEARDOWN:
 			print("processing TEARDOWN\n")
-			if 'event' in self.clientInfo:
-				self.clientInfo['event'].set()
+			self._stop_streaming()
 			
 			self.replyRtsp(self.OK_200, seq[1])
 			
 			# Close the RTP socket
-			if 'rtpSocketHandler' in self.clientInfo:
-				self.clientInfo['rtpSocketHandler'].destroy()
+			handler = self.clientInfo.pop('rtpSocketHandler', None)
+			if handler is not None:
+				handler.destroy()
 			shouldKeepAlive = False
 		return shouldKeepAlive
 			
@@ -233,10 +259,10 @@ class ServerWorker:
 
 	def close(self):
 		"""Release session resources."""
-		if 'event' in self.clientInfo:
-			self.clientInfo['event'].set()
-		if 'rtpSocketHandler' in self.clientInfo:
+		self._stop_streaming()
+		handler = self.clientInfo.pop('rtpSocketHandler', None)
+		if handler is not None:
 			try:
-				self.clientInfo['rtpSocketHandler'].destroy()
+				handler.destroy()
 			except OSError:
 				pass
