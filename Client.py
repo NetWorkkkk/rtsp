@@ -3,7 +3,7 @@ import tkinter.messagebox
 from PIL import Image, ImageTk
 import socket, threading, sys, traceback, os
 
-from RtpPacket import RtpPacket
+from RtpPacket import RtpPacket, HEADER_SIZE as RTP_HEADER_SIZE
 
 CACHE_FILE_NAME = "cache-"
 CACHE_FILE_EXT = ".jpg"
@@ -36,7 +36,11 @@ class socketUDPHandler(socketBaseHandler):
 	def recvData(self, max_size):
 		if self.sock is None:
 			raise RuntimeError("UDP socket handler is not initialized")
-		return self.sock.recv(max_size)
+		data = self.sock.recv(max_size)
+		print("[UDP] data head: ", data[12:][:8].hex())
+		print("[UDP] data tail: ", data[-8:].hex())
+		print("[UDP] has data of len", len(data))
+		return data
 
 	def destroy(self):
 		if self.sock is not None:
@@ -53,24 +57,57 @@ class socketTCPHandler(socketBaseHandler):
 	def __init__(self):
 		self.listen_sock = None
 		self.conn_sock = None
+		# TCP is a byte stream; buffer partial reads so recvData can hand back
+		# exactly one RTP packet per call (matching the UDP handler's contract).
+		self.recv_buffer = bytearray()
 
 	def initSocket(self, port):
 		self.listen_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 		self.listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 		self.listen_sock.bind(('', int(port)))
 		self.listen_sock.listen(1)
-		self.listen_sock.settimeout(0.5)
+		# Server connects to us during its SETUP handling (after we send the
+		# RTSP SETUP). Accept on a background thread so initSocket doesn't block.
+		threading.Thread(target=self._acceptConn, daemon=True).start()
+
+	def _acceptConn(self):
+		try:
+			conn, _ = self.listen_sock.accept()
+			conn.settimeout(0.5)
+			self.conn_sock = conn
+		except OSError:
+			return
+		finally:
+			if self.listen_sock is not None:
+				try:
+					self.listen_sock.close()
+				except OSError:
+					pass
+				self.listen_sock = None
 
 	def recvData(self, max_size):
-		if self.listen_sock is None:
-			raise RuntimeError("TCP socket handler is not initialized")
 		if self.conn_sock is None:
-			self.conn_sock, _ = self.listen_sock.accept()
-			self.conn_sock.settimeout(0.5)
-		data = self.conn_sock.recv(max_size)
-		if not data:
-			raise OSError("TCP media connection closed")
-		return data
+			# Connection not yet accepted; treat as a transient read timeout
+			# so listenRtp keeps looping until the server connects.
+			raise socket.timeout()
+		# Fill buffer until we have a complete RTP header, then parse the
+		# payload length out of the SSRC field (sender-side convention).
+		self._fill(RTP_HEADER_SIZE, max_size)
+		h = self.recv_buffer
+		payload_len = (h[8] << 24) | (h[9] << 16) | (h[10] << 8) | h[11]
+		total_len = RTP_HEADER_SIZE + payload_len
+		self._fill(total_len, max_size)
+		packet = bytes(self.recv_buffer[:total_len])
+		del self.recv_buffer[:total_len]
+		return packet
+
+	def _fill(self, needed, max_size):
+		"""Read from the TCP socket until the buffer holds `needed` bytes."""
+		while len(self.recv_buffer) < needed:
+			chunk = self.conn_sock.recv(max_size)
+			if not chunk:
+				raise OSError("TCP media connection closed")
+			self.recv_buffer.extend(chunk)
 
 	def destroy(self):
 		if self.conn_sock is not None:
@@ -300,7 +337,8 @@ class Client:
 		"""Teardown button handler."""
 		self.sendRtspRequest(self.TEARDOWN)		
 		self.master.destroy() # Close the gui window
-		os.remove(CACHE_FILE_NAME + str(self.sessionId) + CACHE_FILE_EXT) # Delete the cache image from video
+		if self.sessionId != 0:
+			os.remove(CACHE_FILE_NAME + str(self.sessionId) + CACHE_FILE_EXT) # Delete the cache image from video
 
 	def pauseMovie(self):
 		"""Pause button handler."""
@@ -313,10 +351,10 @@ class Client:
 	def playMovie(self):
 		"""Play button handler."""
 		if self.state == self.READY:
-			# Create a new thread to listen for RTP packets
-			threading.Thread(target=self.listenRtp).start()
 			self.playEvent = threading.Event()
 			self.playEvent.clear()
+			# Create a new thread to listen for RTP packets
+			threading.Thread(target=self.listenRtp).start()
 			self.sendRtspRequest(self.PLAY)
 	
 	def listenRtp(self):		

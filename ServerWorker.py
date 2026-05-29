@@ -58,16 +58,12 @@ class socketTCPHandler(socketBaseHandler):
 	def initSocket(self, address, port):
 		self.destroy()
 		self.remote = (address, int(port))
-
-	def _connect(self):
-		if self.remote is None:
-			raise RuntimeError("TCP socket handler has no remote endpoint")
-		if self.sock is None:
-			self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-			self.sock.connect(self.remote)
+		self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+		self.sock.connect(self.remote)
 
 	def sendData(self, data):
-		self._connect()
+		if self.sock is None:
+			raise RuntimeError("TCP socket handler is not initialized")
 		self.sock.sendall(data)
 
 	def destroy(self):
@@ -235,7 +231,9 @@ class ServerWorker:
 		marker = 0
 		pt = 26 # MJPEG type
 		seqnum = frameNbr
-		ssrc = 0 
+		# Repurpose SSRC as payload length so the TCP receiver can frame packets
+		# in the byte stream. UDP receivers ignore it.
+		ssrc = len(payload)
 		
 		rtpPacket = RtpPacket()
 		
