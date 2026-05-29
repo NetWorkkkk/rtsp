@@ -1,12 +1,10 @@
 from tkinter import *
 import tkinter.messagebox
 from PIL import Image, ImageTk
-import socket, threading, sys, traceback, os
+import socket, threading, sys, traceback
+import io
 
 from RtpPacket import RtpPacket, HEADER_SIZE as RTP_HEADER_SIZE
-
-CACHE_FILE_NAME = "cache-"
-CACHE_FILE_EXT = ".jpg"
 
 
 class socketBaseHandler:
@@ -335,10 +333,8 @@ class Client:
 	
 	def exitClient(self):
 		"""Teardown button handler."""
-		self.sendRtspRequest(self.TEARDOWN)		
+		self.sendRtspRequest(self.TEARDOWN)
 		self.master.destroy() # Close the gui window
-		if self.sessionId != 0:
-			os.remove(CACHE_FILE_NAME + str(self.sessionId) + CACHE_FILE_EXT) # Delete the cache image from video
 
 	def pauseMovie(self):
 		"""Pause button handler."""
@@ -370,7 +366,7 @@ class Client:
 										
 					if currFrameNbr > self.frameNbr: # Discard the late packet
 						self.frameNbr = currFrameNbr
-						self.updateMovie(self.writeFrame(rtpPacket.getPayload()))
+						self.updateMovie(rtpPacket.getPayload())
 			except Exception:
 				# Stop listening upon requesting PAUSE or TEARDOWN
 				if self.playEvent.isSet(): 
@@ -383,19 +379,10 @@ class Client:
 						self.rtpSocketHandler = None
 					break
 						
-	def writeFrame(self, data):
-		"""Write the received frame to a temp image file. Return the image file."""
-		cachename = CACHE_FILE_NAME + str(self.sessionId) + CACHE_FILE_EXT
-		file = open(cachename, "wb")
-		file.write(data)
-		file.close()
-		
-		return cachename
-	
-	def updateMovie(self, imageFile):
-		"""Update the image file as video frame in the GUI."""
-		photo = ImageTk.PhotoImage(Image.open(imageFile))
-		self.label.configure(image = photo, height=288) 
+	def updateMovie(self, payload):
+		"""Render an RTP JPEG payload directly from memory into the GUI."""
+		photo = ImageTk.PhotoImage(Image.open(io.BytesIO(payload)))
+		self.label.configure(image = photo, height=288)
 		self.label.image = photo
 		
 	def connectToServer(self):
