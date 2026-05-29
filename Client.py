@@ -2,7 +2,7 @@ from tkinter import *
 import tkinter.messagebox
 from PIL import Image, ImageTk
 import socket, threading, sys, traceback
-import io
+import io, queue
 
 from RtpPacket import RtpPacket, HEADER_SIZE as RTP_HEADER_SIZE
 
@@ -152,6 +152,16 @@ class Client:
 		self.rtpSocketHandler = None
 		self.wasPlayingBeforeSetup = False
 		self.rtspReceiverStarted = False
+		# --- Client-side frame buffer (hides SD<->HD switch gap) ---
+		# Bounded FIFO between the RTP receiver thread (producer) and the Tk
+		# main-thread render tick (consumer). Producer BLOCKS on overflow,
+		# consumer SKIPS on underflow (keeps the last drawn frame on screen).
+		self.frameBufferSize = 30           # ~1.5s at 20fps
+		self.preRollTarget = 15             # frames to accumulate before first render
+		self.renderTickMs = 50              # matches server pacing (~20fps)
+		self.frameBuffer = queue.Queue(maxsize=self.frameBufferSize)
+		self.renderTickScheduled = False
+		self.preRollDone = False
 		
 	def createWidgets(self):
 		"""Build GUI."""
@@ -352,24 +362,30 @@ class Client:
 			# Create a new thread to listen for RTP packets
 			threading.Thread(target=self.listenRtp).start()
 			self.sendRtspRequest(self.PLAY)
+			# Pre-roll again on each PLAY so a long pause doesn't show a stale
+			# frame instantly; the existing buffered frames are preserved.
+			self.preRollDone = False
+			if not self.renderTickScheduled:
+				self.renderTickScheduled = True
+				self.master.after(self.renderTickMs, self._renderTick)
 	
-	def listenRtp(self):		
-		"""Listen for RTP packets."""
+	def listenRtp(self):
+		"""Listen for RTP packets and push payloads into the frame buffer."""
 		while True:
 			try:
 				data = self.rtpSocketHandler.recvData(20480)
 				if data:
 					rtpPacket = RtpPacket()
 					rtpPacket.decode(data)
-					
+
 					currFrameNbr = rtpPacket.seqNum()
-										
+
 					if currFrameNbr > self.frameNbr: # Discard the late packet
 						self.frameNbr = currFrameNbr
-						self.updateMovie(rtpPacket.getPayload())
+						self._enqueuePayload(rtpPacket.getPayload())
 			except Exception:
 				# Stop listening upon requesting PAUSE or TEARDOWN
-				if self.playEvent.isSet(): 
+				if self.playEvent.isSet():
 					break
 
 				# Upon receiving ACK for TEARDOWN request, close RTP socket.
@@ -378,7 +394,41 @@ class Client:
 						self.rtpSocketHandler.destroy()
 						self.rtpSocketHandler = None
 					break
-						
+
+	def _enqueuePayload(self, payload):
+		"""Block producer when the buffer is full; bail out on stop signals."""
+		while True:
+			try:
+				self.frameBuffer.put(payload, timeout=0.2)
+				return
+			except queue.Full:
+				if self.playEvent.isSet() or self.teardownAcked == 1:
+					return
+				# else keep waiting for consumer to drain
+
+	def _renderTick(self):
+		"""Tk-thread consumer: pop one frame per tick, skip if buffer empty."""
+		if self.state != self.PLAYING:
+			self.renderTickScheduled = False
+			return
+
+		# Pre-roll: wait until the buffer has built up before drawing the
+		# first frame; smooths out the producer ramp-up after PLAY.
+		if not self.preRollDone:
+			if self.frameBuffer.qsize() < self.preRollTarget:
+				self.master.after(self.renderTickMs, self._renderTick)
+				return
+			self.preRollDone = True
+
+		try:
+			payload = self.frameBuffer.get_nowait()
+			self.updateMovie(payload)
+		except queue.Empty:
+			# Underflow: keep showing the last drawn frame, try again next tick.
+			pass
+
+		self.master.after(self.renderTickMs, self._renderTick)
+
 	def updateMovie(self, payload):
 		"""Render an RTP JPEG payload directly from memory into the GUI."""
 		photo = ImageTk.PhotoImage(Image.open(io.BytesIO(payload)))
