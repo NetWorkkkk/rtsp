@@ -76,6 +76,7 @@ class ServerWorker:
 	PLAY = 'PLAY'
 	PAUSE = 'PAUSE'
 	TEARDOWN = 'TEARDOWN'
+	PACE = 'PACE'  # Client-driven flow control: PACE PAUSE / PACE RESUME
 	
 	INIT = 0
 	READY = 1
@@ -90,6 +91,10 @@ class ServerWorker:
 	
 	def __init__(self, clientInfo):
 		self.clientInfo = clientInfo
+		# Flow-control gate driven by the client's PACE messages.
+		# set = sender may emit; clear = sender must hold off.
+		self.clientInfo['flowEvent'] = threading.Event()
+		self.clientInfo['flowEvent'].set()
 
 	def _stop_streaming(self):
 		"""Stop current RTP sender thread if running."""
@@ -113,6 +118,8 @@ class ServerWorker:
 
 	def _start_streaming_worker(self):
 		"""Start RTP sender worker thread."""
+		# Reset flow-control to GO; client will re-pace if it falls behind again.
+		self.clientInfo['flowEvent'].set()
 		self.clientInfo['event'] = threading.Event()
 		self.clientInfo['worker'] = threading.Thread(target=self.sendRtp)
 		self.clientInfo['worker'].start()
@@ -188,6 +195,16 @@ class ServerWorker:
 			
 				self.replyRtsp(self.OK_200, seq[1])
 		
+		# Process PACE request (client-driven flow control)
+		elif requestType == self.PACE:
+			action = filename.upper()  # filename slot carries PAUSE | RESUME
+			if action == 'PAUSE':
+				self.clientInfo['flowEvent'].clear()
+			elif action == 'RESUME':
+				self.clientInfo['flowEvent'].set()
+			if 'session' in self.clientInfo:
+				self.replyRtsp(self.OK_200, seq[1])
+
 		# Process TEARDOWN request
 		elif requestType == self.TEARDOWN:
 			print("processing TEARDOWN\n")
@@ -203,14 +220,19 @@ class ServerWorker:
 		return shouldKeepAlive
 			
 	def sendRtp(self):
-		"""Send RTP packets over UDP."""
+		"""Send RTP packets to the client."""
 		while True:
-			self.clientInfo['event'].wait(0.05) 
-			
+			self.clientInfo['event'].wait(0.05)
+
 			# Stop sending if request is PAUSE or TEARDOWN
-			if self.clientInfo['event'].isSet(): 
-				break 
-				
+			if self.clientInfo['event'].isSet():
+				break
+
+			# Honour client-driven flow control. Wait with a timeout so the
+			# stop signal above is still polled while we're flow-paused.
+			if not self.clientInfo['flowEvent'].wait(timeout=0.5):
+				continue
+
 			data = self.clientInfo['videoStream'].nextFrame()
 			if data: 
 				frameNumber = self.clientInfo['videoStream'].frameNbr()

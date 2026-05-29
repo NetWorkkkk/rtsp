@@ -35,9 +35,6 @@ class socketUDPHandler(socketBaseHandler):
 		if self.sock is None:
 			raise RuntimeError("UDP socket handler is not initialized")
 		data = self.sock.recv(max_size)
-		print("[UDP] data head: ", data[12:][:8].hex())
-		print("[UDP] data tail: ", data[-8:].hex())
-		print("[UDP] has data of len", len(data))
 		return data
 
 	def destroy(self):
@@ -132,6 +129,7 @@ class Client:
 	PLAY = 1
 	PAUSE = 2
 	TEARDOWN = 3
+	PACE = 4   # Internal marker for client-driven flow-control control message
 	
 	# Initiation..
 	def __init__(self, master, serveraddr, serverport, rtpport, filename):
@@ -156,12 +154,22 @@ class Client:
 		# Bounded FIFO between the RTP receiver thread (producer) and the Tk
 		# main-thread render tick (consumer). Producer BLOCKS on overflow,
 		# consumer SKIPS on underflow (keeps the last drawn frame on screen).
-		self.frameBufferSize = 30           # ~1.5s at 20fps
+		self.frameBufferSize = 100          # 5s at 20fps
 		self.preRollTarget = 15             # frames to accumulate before first render
 		self.renderTickMs = 50              # matches server pacing (~20fps)
 		self.frameBuffer = queue.Queue(maxsize=self.frameBufferSize)
 		self.renderTickScheduled = False
 		self.preRollDone = False
+		# --- Flow control over RTSP ---
+		# When the buffer crosses the high-water mark the client tells the
+		# server to hold off; when it drops to the low-water mark it tells
+		# the server to resume. Hysteresis prevents oscillation.
+		self.highWaterMark = 90
+		self.lowWaterMark = 60
+		self.flowPaced = False
+		self.paceSeq = 0
+		# Serialises writes to rtspSocket across producer/consumer/Tk threads.
+		self.rtspLock = threading.Lock()
 		
 	def createWidgets(self):
 		"""Build GUI."""
@@ -343,6 +351,9 @@ class Client:
 	
 	def exitClient(self):
 		"""Teardown button handler."""
+		# Server resets flowEvent when starting a worker; clearing locally
+		# keeps the client side of the flow-control state consistent.
+		self.flowPaced = False
 		self.sendRtspRequest(self.TEARDOWN)
 		self.master.destroy() # Close the gui window
 
@@ -352,6 +363,7 @@ class Client:
 
 		if self.state == self.PLAYING:
 			print("Pausing movie...")
+			self.flowPaced = False
 			self.sendRtspRequest(self.PAUSE)
 	
 	def playMovie(self):
@@ -383,6 +395,7 @@ class Client:
 					if currFrameNbr > self.frameNbr: # Discard the late packet
 						self.frameNbr = currFrameNbr
 						self._enqueuePayload(rtpPacket.getPayload())
+						print(f"\nbuffer={self.frameBuffer.qsize()}/{self.frameBufferSize}")
 			except Exception:
 				# Stop listening upon requesting PAUSE or TEARDOWN
 				if self.playEvent.isSet():
@@ -400,11 +413,16 @@ class Client:
 		while True:
 			try:
 				self.frameBuffer.put(payload, timeout=0.2)
-				return
+				break
 			except queue.Full:
 				if self.playEvent.isSet() or self.teardownAcked == 1:
 					return
 				# else keep waiting for consumer to drain
+		# High-water: ask the server to hold off so the kernel UDP recv
+		# buffer can't fill while we're behind on rendering.
+		if not self.flowPaced and self.frameBuffer.qsize() >= self.highWaterMark:
+			self.flowPaced = True
+			self.sendPaceRequest("PAUSE")
 
 	def _renderTick(self):
 		"""Tk-thread consumer: pop one frame per tick, skip if buffer empty."""
@@ -423,6 +441,10 @@ class Client:
 		try:
 			payload = self.frameBuffer.get_nowait()
 			self.updateMovie(payload)
+			# Low-water: tell the server it's safe to send again.
+			if self.flowPaced and self.frameBuffer.qsize() <= self.lowWaterMark:
+				self.flowPaced = False
+				self.sendPaceRequest("RESUME")
 		except queue.Empty:
 			# Underflow: keep showing the last drawn frame, try again next tick.
 			pass
@@ -517,10 +539,33 @@ class Client:
 		else:
 			return
 		
-		# Send the RTSP request using rtspSocket.
-		self.rtspSocket.send(request.encode())
-		
+		# Send the RTSP request using rtspSocket. Locked because PACE
+		# messages may also write to this socket from other threads.
+		with self.rtspLock:
+			self.rtspSocket.send(request.encode())
+
 		print('\nData sent:\n' + request)
+
+	def sendPaceRequest(self, action):
+		"""Send a flow-control PACE message (PAUSE | RESUME) to the server.
+
+		Uses its own CSeq counter so PACE replies never match the playback
+		request seq — they're effectively ignored by parseRtspReply.
+		"""
+		if self.sessionId == 0 or self.teardownAcked == 1:
+			return
+		with self.rtspLock:
+			self.paceSeq += 1
+			request = (
+				f"PACE {action} RTSP/1.0\n"
+				f"CSeq: -{self.paceSeq}\n"
+				f"Session: {self.sessionId}"
+			)
+			try:
+				self.rtspSocket.send(request.encode())
+			except OSError:
+				pass
+		print(f"\n[PACE] {action} sent (buffer={self.frameBuffer.qsize()}/{self.frameBufferSize})")
 	
 	def recvRtspReply(self):
 		"""Receive RTSP reply from the server."""
@@ -541,9 +586,6 @@ class Client:
 		"""Parse the RTSP reply from the server."""
 		lines = data.split('\n')
 		seqNum = int(lines[1].split(' ')[1])
-		print("[+] Received Data:\n", data)
-		print("[+] Current State:", self.state)
-		print("[+] Current sent request:", self.requestSent)
 		# Process only if the server reply's sequence number is the same as the request's
 		if seqNum == self.rtspSeq:
 			session = int(lines[2].split(' ')[1])
