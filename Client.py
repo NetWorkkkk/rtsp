@@ -187,7 +187,12 @@ class Client:
 		self.currentTileFrameNbr = -1
 		self.currentTiles = {}
 		self.lastTiles = {}
-		
+		# Frames already composed and queued for render but not yet drawn.
+		# Late-arriving tiles patch the PIL Image in-place via pendingLock
+		# so the consumer never reads a half-pasted canvas.
+		self.pendingFrames = {}   # frame_nbr -> {image, tile_dims, received}
+		self.pendingLock = threading.Lock()
+
 	def createWidgets(self):
 		"""Build GUI."""
 		self.qualityMode = StringVar(value="SD")
@@ -430,40 +435,70 @@ class Client:
 
 	def _handleTilePacket(self, rtpPacket):
 		"""Collect tiles for one frame; close & compose when the frame turns over
-		or all tiles arrived. Late packets for older frames are discarded.
+		or all tiles arrived. Late packets for older frames patch the pending
+		canvas in-place if it's still waiting to be rendered.
 		"""
 		frame_nbr = rtpPacket.seqNum()
 		tile_idx = rtpPacket.ssrc() & 0xFF
+		payload = rtpPacket.getPayload()
 
 		if frame_nbr > self.currentTileFrameNbr:
 			# A new frame has started — finalise the previous one (if any).
 			if self.currentTiles:
 				self._closeFrame()
 			self.currentTileFrameNbr = frame_nbr
-			self.currentTiles = {tile_idx: rtpPacket.getPayload()}
+			self.currentTiles = {tile_idx: payload}
 		elif frame_nbr == self.currentTileFrameNbr:
-			self.currentTiles[tile_idx] = rtpPacket.getPayload()
+			self.currentTiles[tile_idx] = payload
 		else:
-			# Late packet for an already-closed frame: drop.
+			# Late packet for an already-closed frame: try to patch it in
+			# the queue; if that frame already rendered/dropped, drop.
+			self._patchPendingFrame(frame_nbr, tile_idx, payload)
 			return
 
 		# Fast path: all tiles in, no need to wait for next frame to close.
 		if len(self.currentTiles) == NUM_TILES:
 			self._closeFrame()
 
+	def _patchPendingFrame(self, frame_nbr, tile_idx, jpg):
+		"""Paste a late-arriving tile into a frame still waiting in the queue."""
+		with self.pendingLock:
+			entry = self.pendingFrames.get(frame_nbr)
+			if entry is None or tile_idx in entry['received']:
+				return  # frame already rendered/dropped, or duplicate
+			try:
+				tile_img = Image.open(io.BytesIO(jpg)).convert("RGB")
+			except Exception:
+				return
+			tile_w, tile_h = entry['tile_dims']
+			col = tile_idx % GRID_N
+			row = tile_idx // GRID_N
+			entry['image'].paste(tile_img, (col * tile_w, row * tile_h))
+			entry['received'].add(tile_idx)
+
 	def _closeFrame(self):
 		"""Compose the in-progress tile set into a frame and enqueue, or drop."""
 		tiles = self.currentTiles
+		frame_nbr = self.currentTileFrameNbr
 		self.currentTiles = {}
 		if len(tiles) < MIN_TILES_TO_RENDER:
 			return  # below 50%, frame is unusable
-		composed = self._composeFrame(tiles)
-		if composed is not None:
-			self._enqueuePayload(composed)
+		result = self._composeFrame(tiles)
+		if result is None:
+			return
+		composed, tile_dims, received = result
+		with self.pendingLock:
+			self.pendingFrames[frame_nbr] = {
+				'image': composed,
+				'tile_dims': tile_dims,
+				'received': received,
+			}
+		self._enqueuePayload((frame_nbr, composed))
 
 	def _composeFrame(self, tiles):
 		"""Build a full-frame PIL Image from received tiles, filling missing
-		positions from lastTiles or with black.
+		positions from lastTiles or with black. Returns (image, tile_dims,
+		received_idx_set) or None if no tiles decoded.
 		"""
 		decoded = {}
 		for idx, jpg in tiles.items():
@@ -476,6 +511,7 @@ class Client:
 		sample = next(iter(decoded.values()))
 		tile_w, tile_h = sample.size
 		canvas = Image.new("RGB", (tile_w * GRID_N, tile_h * GRID_M), (0, 0, 0))
+		received = set()
 		for idx in range(NUM_TILES):
 			col = idx % GRID_N
 			row = idx // GRID_N
@@ -486,12 +522,13 @@ class Client:
 				# with previously-borrowed ones — otherwise stale tiles would
 				# propagate forever.
 				self.lastTiles[idx] = tile_img
+				received.add(idx)
 			elif idx in self.lastTiles:
 				tile_img = self.lastTiles[idx]
 			else:
 				continue  # leave black
 			canvas.paste(tile_img, pos)
-		return canvas
+		return canvas, (tile_w, tile_h), received
 
 	def _enqueuePayload(self, payload):
 		"""Block producer when the buffer is full; bail out on stop signals."""
@@ -543,11 +580,19 @@ class Client:
 		self.master.after(self.renderTickMs, self._renderTick)
 
 	def updateMovie(self, payload):
-		"""Render a queued frame into the GUI. Accepts either a JPEG byte
-		string (HD/TCP whole-frame path) or a pre-composed PIL Image
-		(SD/UDP tile-reconstruction path).
+		"""Render a queued frame into the GUI.
+
+		Payload shapes:
+		- bytes / bytearray: HD/TCP whole-frame JPEG.
+		- (frame_nbr, PIL.Image): SD/UDP tile-reconstructed frame; we evict
+		  the matching pendingFrames entry so late tiles can't patch it
+		  while we're constructing the PhotoImage.
 		"""
-		if isinstance(payload, (bytes, bytearray)):
+		if isinstance(payload, tuple):
+			frame_nbr, img = payload
+			with self.pendingLock:
+				self.pendingFrames.pop(frame_nbr, None)
+		elif isinstance(payload, (bytes, bytearray)):
 			img = Image.open(io.BytesIO(payload))
 		else:
 			img = payload
@@ -727,6 +772,8 @@ class Client:
 		# intentionally so it can still back-fill the first new SD frame.
 		self.currentTileFrameNbr = -1
 		self.currentTiles = {}
+		with self.pendingLock:
+			self.pendingFrames.clear()
 
 	def handler(self):
 		"""Handler on explicitly closing the GUI window."""
