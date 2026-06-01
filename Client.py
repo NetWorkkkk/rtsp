@@ -3,7 +3,6 @@ import tkinter.messagebox
 from PIL import Image, ImageTk
 import socket, threading, sys, traceback
 import io, queue
-from datetime import datetime
 
 from RtpPacket import RtpPacket, HEADER_SIZE as RTP_HEADER_SIZE
 
@@ -188,22 +187,6 @@ class Client:
 		self.currentTileFrameNbr = -1
 		self.currentTiles = {}
 		self.lastTiles = {}
-		# --- Debug instrumentation ---
-		self.debugEnabled = True
-		self.debugPacketEvery = 20
-		self.debugRenderEvery = 10
-		self.debugRenderTickCount = 0
-		self.debugRtpPacketCount = 0
-		self.debugRenderFrameCount = 0
-		self.debugPreRollLastQsize = -1
-
-	def _dbg(self, message):
-		"""Debug logger with timestamp + thread name."""
-		if not self.debugEnabled:
-			return
-		ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-		tname = threading.current_thread().name
-		print(f"[DBG {ts}][{tname}] {message}")
 		
 	def createWidgets(self):
 		"""Build GUI."""
@@ -403,10 +386,6 @@ class Client:
 	def playMovie(self):
 		"""Play button handler."""
 		if self.state == self.READY:
-			self._dbg(
-				f"PLAY pressed; state={self.state}, requestSent={self.requestSent}, "
-				f"buffer={self.frameBuffer.qsize()}/{self.frameBufferSize}, transport={self.transport}"
-			)
 			self.playEvent = threading.Event()
 			self.playEvent.clear()
 			# Create a new thread to listen for RTP packets
@@ -421,14 +400,12 @@ class Client:
 	
 	def listenRtp(self):
 		"""Listen for RTP packets and push payloads into the frame buffer."""
-		self._dbg("listenRtp started")
 		while True:
 			try:
 				data = self.rtpSocketHandler.recvData(20480)
 				if data:
 					rtpPacket = RtpPacket()
 					rtpPacket.decode(data)
-					self.debugRtpPacketCount += 1
 
 					if self.transport == "UDP":
 						# SD/UDP path: each packet is one tile of an N x M grid.
@@ -439,21 +416,9 @@ class Client:
 						if currFrameNbr > self.frameNbr: # Discard the late packet
 							self.frameNbr = currFrameNbr
 							self._enqueuePayload(rtpPacket.getPayload())
-					if self.debugRtpPacketCount % self.debugPacketEvery == 0:
-						self._dbg(
-							f"RTP received={self.debugRtpPacketCount}, frameNbr={self.frameNbr}, "
-							f"buffer={self.frameBuffer.qsize()}/{self.frameBufferSize}, "
-							f"state={self.state}, preRollDone={self.preRollDone}"
-						)
 			except Exception:
-				self._dbg(
-					f"listenRtp exception; state={self.state}, requestSent={self.requestSent}, "
-					f"teardownAcked={self.teardownAcked}, buffer={self.frameBuffer.qsize()}/{self.frameBufferSize}"
-				)
-				traceback.print_exc()
 				# Stop listening upon requesting PAUSE or TEARDOWN
 				if self.playEvent.isSet():
-					self._dbg("listenRtp stopping because playEvent is set")
 					break
 
 				# Upon receiving ACK for TEARDOWN request, close RTP socket.
@@ -461,7 +426,6 @@ class Client:
 					if self.rtpSocketHandler is not None:
 						self.rtpSocketHandler.destroy()
 						self.rtpSocketHandler = None
-					self._dbg("listenRtp stopping because teardownAcked=1")
 					break
 
 	def _handleTilePacket(self, rtpPacket):
@@ -534,19 +498,9 @@ class Client:
 		while True:
 			try:
 				self.frameBuffer.put(payload, timeout=0.2)
-				if self.frameBuffer.qsize() in (1, self.preRollTarget, self.highWaterMark):
-					self._dbg(
-						f"enqueue ok, qsize={self.frameBuffer.qsize()}/{self.frameBufferSize}, "
-						f"state={self.state}, preRollDone={self.preRollDone}"
-					)
 				break
 			except queue.Full:
-				self._dbg(
-					f"enqueue blocked (FULL), qsize={self.frameBuffer.qsize()}/{self.frameBufferSize}, "
-					f"state={self.state}"
-				)
 				if self.playEvent.isSet() or self.teardownAcked == 1:
-					self._dbg("enqueue abort due to stop/teardown flag")
 					return
 				# else keep waiting for consumer to drain
 		# High-water: ask the server to hold off so the kernel UDP recv
@@ -557,67 +511,34 @@ class Client:
 
 	def _renderTick(self):
 		"""Tk-thread consumer: pop one frame per tick, skip if buffer empty."""
-		self.debugRenderTickCount += 1
 		if self.state != self.PLAYING:
 			# VPN/high-latency links can delay PLAY ACK past the first tick.
 			# Keep the render loop alive while PLAY is in-flight, otherwise the
 			# producer fills the buffer but nothing ever consumes it.
 			if self.state == self.READY and self.requestSent == self.PLAY:
-				if self.debugRenderTickCount % self.debugRenderEvery == 0:
-					self._dbg(
-						f"render waiting PLAY ACK, tick={self.debugRenderTickCount}, "
-						f"qsize={self.frameBuffer.qsize()}/{self.frameBufferSize}"
-					)
 				self.master.after(self.renderTickMs, self._renderTick)
 				return
-			self._dbg(
-				f"render loop stop; state={self.state}, requestSent={self.requestSent}, "
-				f"tick={self.debugRenderTickCount}, qsize={self.frameBuffer.qsize()}/{self.frameBufferSize}"
-			)
 			self.renderTickScheduled = False
 			return
 
 		# Pre-roll: wait until the buffer has built up before drawing the
 		# first frame; smooths out the producer ramp-up after PLAY.
 		if not self.preRollDone:
-			qsize = self.frameBuffer.qsize()
-			if qsize < self.preRollTarget:
-				if qsize != self.debugPreRollLastQsize:
-					self._dbg(
-						f"preRoll waiting: qsize={qsize}/{self.preRollTarget}, "
-						f"tick={self.debugRenderTickCount}"
-					)
-					self.debugPreRollLastQsize = qsize
+			if self.frameBuffer.qsize() < self.preRollTarget:
 				self.master.after(self.renderTickMs, self._renderTick)
 				return
 			self.preRollDone = True
-			self._dbg(
-				f"preRoll done at qsize={qsize}, tick={self.debugRenderTickCount}; start rendering"
-			)
 
 		try:
 			payload = self.frameBuffer.get_nowait()
 			self.updateMovie(payload)
-			self.debugRenderFrameCount += 1
-			if self.debugRenderFrameCount % self.debugRenderEvery == 0:
-				self._dbg(
-					f"rendered frames={self.debugRenderFrameCount}, "
-					f"qsize={self.frameBuffer.qsize()}/{self.frameBufferSize}, flowPaced={self.flowPaced}"
-				)
 			# Low-water: tell the server it's safe to send again.
 			if self.flowPaced and self.frameBuffer.qsize() <= self.lowWaterMark:
 				self.flowPaced = False
 				self.sendPaceRequest("RESUME")
 		except queue.Empty:
 			# Underflow: keep showing the last drawn frame, try again next tick.
-			if self.debugRenderTickCount % self.debugRenderEvery == 0:
-				self._dbg(
-					f"render underflow, qsize={self.frameBuffer.qsize()}/{self.frameBufferSize}, "
-					f"state={self.state}"
-				)
-		except Exception:
-			self._dbg("updateMovie raised exception")
-			traceback.print_exc()
+			pass
 
 		self.master.after(self.renderTickMs, self._renderTick)
 
@@ -749,16 +670,10 @@ class Client:
 		while True:
 			reply = self.rtspSocket.recv(1024)
 			if not reply:
-				self._dbg("RTSP recv returned EOF; stopping recvRtspReply")
 				break
-			self._dbg(f"RTSP raw reply bytes={len(reply)}")
 			
 			if reply: 
-				try:
-					self.parseRtspReply(reply.decode("utf-8"))
-				except Exception:
-					self._dbg("parseRtspReply failed")
-					traceback.print_exc()
+				self.parseRtspReply(reply.decode("utf-8"))
 			
 		# Close the RTSP socket upon requesting Teardown
 				if self.requestSent == self.TEARDOWN:
@@ -769,7 +684,6 @@ class Client:
 	
 	def parseRtspReply(self, data):
 		"""Parse the RTSP reply from the server."""
-		self._dbg(f"RTSP reply text: {data!r}")
 		lines = data.split('\n')
 		seqNum = int(lines[1].split(' ')[1])
 		# Process only if the server reply's sequence number is the same as the request's
@@ -799,8 +713,6 @@ class Client:
 						
 						# Flag the teardownAcked to close the socket.
 						self.teardownAcked = 1 
-		else:
-			self._dbg(f"Ignore RTSP reply with seq={seqNum}, expected={self.rtspSeq}")
 		print("[+] Updated State:", self.state)
 	
 	def openRtpPort(self):
