@@ -82,6 +82,13 @@ This project is a basic RTP-over-UDP video streaming demo controlled by RTSP-ove
 - Sample MJPEG video source used by server streaming logic.
 - Expected by `VideoStream`/RTSP `SETUP` flow when requested by filename.
 
+### `utils/`
+- Video conversion utilities (MP4 <-> custom MJPEG variants):
+  - `ConvertVideo.py`: unified CLI for conversion modes.
+  - `ConvertMp4ToMjpeg_1080p.py`
+  - `ConvertMp4ToMjpeg_480p.py`
+  - `ConvertMjpeg_1080p_480p.py`
+
 ## Current Completeness Notes
 
 - This repository appears to be a teaching/lab skeleton.

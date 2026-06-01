@@ -187,6 +187,7 @@ class Client:
 		self.currentTileFrameNbr = -1
 		self.currentTiles = {}
 		self.lastTiles = {}
+		self.defaultDisplayWidth = 512
 		# Frames already composed and queued for render but not yet drawn.
 		# Late-arriving tiles patch the PIL Image in-place via pendingLock
 		# so the consumer never reads a half-pasted canvas.
@@ -596,8 +597,26 @@ class Client:
 			img = Image.open(io.BytesIO(payload))
 		else:
 			img = payload
+		img = img.convert("RGB")
+		render_width = self.videoFrame.winfo_width()
+		render_height_limit = self.videoFrame.winfo_height()
+		if render_width <= 1:
+			render_width = self.label.winfo_width()
+		if render_height_limit <= 1:
+			render_height_limit = self.label.winfo_height()
+		if render_width <= 1:
+			render_width = self.defaultDisplayWidth
+		if render_height_limit <= 1:
+			render_height_limit = int(self.defaultDisplayWidth * 9 / 16)
+		src_w, src_h = img.size
+		scale = min(render_width / max(1, src_w), render_height_limit / max(1, src_h))
+		scale = max(scale, 1e-6)
+		render_width = max(1, int(src_w * scale))
+		render_height = max(1, int(src_h * scale))
+		resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
+		img = img.resize((render_width, render_height), resample)
 		photo = ImageTk.PhotoImage(img)
-		self.label.configure(image=photo, height=288)
+		self.label.configure(image=photo, width=render_width, height=render_height)
 		self.label.image = photo
 		
 	def connectToServer(self):

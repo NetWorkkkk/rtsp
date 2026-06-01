@@ -1,4 +1,5 @@
 from random import randint
+import os
 import sys, traceback, threading, socket
 from io import BytesIO
 
@@ -133,6 +134,56 @@ class ServerWorker:
 		self.clientInfo['event'] = threading.Event()
 		self.clientInfo['worker'] = threading.Thread(target=self.sendRtp)
 		self.clientInfo['worker'].start()
+
+	def _close_video_stream(self, stream):
+		"""Close one VideoStream instance safely."""
+		if stream is None:
+			return
+		try:
+			stream.file.close()
+		except Exception:
+			pass
+
+	def _close_all_profile_streams(self):
+		"""Close SD/HD streams and clear profile metadata."""
+		streams = self.clientInfo.pop('videoStreams', None)
+		if streams is not None:
+			for stream in streams.values():
+				self._close_video_stream(stream)
+		self.clientInfo.pop('videoStream', None)
+		self.clientInfo.pop('requestedBaseName', None)
+
+	def _build_profile_paths(self, requested_name):
+		"""Map requested `video.mjpeg` to `SD_video.mjpeg` and `HD_video.mjpeg`."""
+		base_dir = os.path.dirname(requested_name)
+		base_name = os.path.basename(requested_name)
+		sd_name = "SD_" + base_name
+		hd_name = "HD_" + base_name
+		return (
+			os.path.join(base_dir, sd_name),
+			os.path.join(base_dir, hd_name),
+		)
+
+	def _prepare_profile_streams(self, requested_name):
+		"""Open both SD/HD streams once and keep them for fast transport switching."""
+		current_name = self.clientInfo.get('requestedBaseName')
+		if current_name == requested_name and 'videoStreams' in self.clientInfo:
+			return
+
+		self._close_all_profile_streams()
+		sd_path, hd_path = self._build_profile_paths(requested_name)
+		streams = {
+			'SD': VideoStream(sd_path),
+			'HD': VideoStream(hd_path),
+		}
+		self.clientInfo['videoStreams'] = streams
+		self.clientInfo['requestedBaseName'] = requested_name
+
+	def _select_active_profile_stream(self):
+		"""Select stream by transport policy: UDP->SD, TCP->HD."""
+		protocol = self.clientInfo.get('rtpProtocol')
+		profile = 'HD' if protocol == 'TCP' else 'SD'
+		self.clientInfo['videoStream'] = self.clientInfo['videoStreams'][profile]
 		
 	def processRtspRequest(self, data):
 		"""Process RTSP request sent from the client."""
@@ -163,12 +214,15 @@ class ServerWorker:
 			if was_playing:
 				self._stop_streaming()
 
-			if self.state == self.INIT:
-				try:
-					self.clientInfo['videoStream'] = VideoStream(filename)
-				except IOError:
-					self.replyRtsp(self.FILE_NOT_FOUND_404, seq[1])
-					return shouldKeepAlive
+			try:
+				self._prepare_profile_streams(filename)
+			except IOError:
+				self.replyRtsp(self.FILE_NOT_FOUND_404, seq[1])
+				return shouldKeepAlive
+
+			self._select_active_profile_stream()
+
+			if 'session' not in self.clientInfo:
 				self.clientInfo['session'] = randint(100000, 999999)
 
 			try:
@@ -295,6 +349,8 @@ class ServerWorker:
 	def replyRtsp(self, code, seq):
 		"""Send RTSP reply to the client."""
 		if code == self.OK_200:
+			if 'session' not in self.clientInfo:
+				self.clientInfo['session'] = randint(100000, 999999)
 			#print("200 OK")
 			reply = 'RTSP/1.0 200 OK\nCSeq: ' + seq + '\nSession: ' + str(self.clientInfo['session'])
 			connSocket = self.clientInfo['rtspSocket'][0]
@@ -315,3 +371,4 @@ class ServerWorker:
 				handler.destroy()
 			except OSError:
 				pass
+		self._close_all_profile_streams()
