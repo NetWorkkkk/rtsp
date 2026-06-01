@@ -13,7 +13,7 @@ from RtpPacket import RtpPacket, HEADER_SIZE as RTP_HEADER_SIZE
 GRID_N = 8
 GRID_M = 8
 NUM_TILES = GRID_N * GRID_M
-MIN_TILES_TO_RENDER = 1 # (NUM_TILES + 1) // 2   # >= 50% threshold
+MIN_TILES_TO_RENDER = (NUM_TILES + 1) * 3 // 4   # >= 50% threshold
 
 
 class socketBaseHandler:
