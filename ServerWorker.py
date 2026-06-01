@@ -184,6 +184,15 @@ class ServerWorker:
 		protocol = self.clientInfo.get('rtpProtocol')
 		profile = 'HD' if protocol == 'TCP' else 'SD'
 		self.clientInfo['videoStream'] = self.clientInfo['videoStreams'][profile]
+
+	def _sync_profile_streams(self):
+		"""Align SD/HD streams to the same frame index for seamless switching."""
+		streams = self.clientInfo.get('videoStreams')
+		if not streams:
+			return
+		target = max(stream.frameNbr() for stream in streams.values())
+		for stream in streams.values():
+			stream.seekFrame(target)
 		
 	def processRtspRequest(self, data):
 		"""Process RTSP request sent from the client."""
@@ -220,6 +229,7 @@ class ServerWorker:
 				self.replyRtsp(self.FILE_NOT_FOUND_404, seq[1])
 				return shouldKeepAlive
 
+			self._sync_profile_streams()
 			self._select_active_profile_stream()
 
 			if 'session' not in self.clientInfo:
@@ -297,10 +307,29 @@ class ServerWorker:
 			if not self.clientInfo['flowEvent'].wait(timeout=0.5):
 				continue
 
-			data = self.clientInfo['videoStream'].nextFrame()
+			streams = self.clientInfo.get('videoStreams')
+			if streams:
+				sd_stream = streams.get('SD')
+				hd_stream = streams.get('HD')
+				if sd_stream is None or hd_stream is None:
+					continue
+				sd_data = sd_stream.nextFrame()
+				hd_data = hd_stream.nextFrame()
+				if self.clientInfo.get('rtpProtocol') == "UDP":
+					data = sd_data
+					frameNumber = sd_stream.frameNbr()
+				else:
+					data = hd_data
+					frameNumber = hd_stream.frameNbr()
+			else:
+				stream = self.clientInfo.get('videoStream')
+				if stream is None:
+					continue
+				data = stream.nextFrame()
+				frameNumber = stream.frameNbr()
+
 			if not data:
 				continue
-			frameNumber = self.clientInfo['videoStream'].frameNbr()
 			try:
 				if self.clientInfo.get('rtpProtocol') == "UDP":
 					self._sendTiledFrame(data, frameNumber)
