@@ -1,8 +1,18 @@
 from random import randint
 import sys, traceback, threading, socket
+from io import BytesIO
+
+from PIL import Image
 
 from VideoStream import VideoStream
 from RtpPacket import RtpPacket
+
+# Tile-mode constants (SD/UDP only). Each MJPEG frame is split into a
+# GRID_N x GRID_M grid of independently-encoded JPEG tiles so individual
+# UDP packet drops affect only a fraction of the frame.
+GRID_N = 8
+GRID_M = 8
+NUM_TILES = GRID_N * GRID_M
 
 
 class socketBaseHandler:
@@ -234,18 +244,42 @@ class ServerWorker:
 				continue
 
 			data = self.clientInfo['videoStream'].nextFrame()
-			if data: 
-				frameNumber = self.clientInfo['videoStream'].frameNbr()
-				try:
-					self.clientInfo['rtpSocketHandler'].sendData(self.makeRtp(data, frameNumber))
-				except:
-					print("Connection Error")
-					#print('-'*60)
-					#traceback.print_exc(file=sys.stdout)
-					#print('-'*60)
+			if not data:
+				continue
+			frameNumber = self.clientInfo['videoStream'].frameNbr()
+			try:
+				if self.clientInfo.get('rtpProtocol') == "UDP":
+					self._sendTiledFrame(data, frameNumber)
+				else:
+					pkt = self.makeRtp(data, frameNumber, len(data))
+					self.clientInfo['rtpSocketHandler'].sendData(pkt)
+			except:
+				print("Connection Error")
 
-	def makeRtp(self, payload, frameNbr):
-		"""RTP-packetize the video data."""
+	def _sendTiledFrame(self, jpeg_bytes, frameNumber):
+		"""Split an MJPEG frame into GRID_N x GRID_M JPEG tiles and send
+		each as its own RTP packet. Tile index is carried in the SSRC field.
+		"""
+		img = Image.open(BytesIO(jpeg_bytes))
+		w, h = img.size
+		tile_w = w // GRID_N
+		tile_h = h // GRID_M
+		for idx in range(NUM_TILES):
+			col = idx % GRID_N
+			row = idx // GRID_N
+			box = (col * tile_w, row * tile_h, (col + 1) * tile_w, (row + 1) * tile_h)
+			tile = img.crop(box)
+			buf = BytesIO()
+			tile.save(buf, format='JPEG')
+			pkt = self.makeRtp(buf.getvalue(), frameNumber, idx)
+			self.clientInfo['rtpSocketHandler'].sendData(pkt)
+
+	def makeRtp(self, payload, frameNbr, ssrc):
+		"""RTP-packetize the video data.
+
+		ssrc carries transport-specific metadata: TCP framing uses
+		len(payload); UDP tile mode uses the tile index.
+		"""
 		version = 2
 		padding = 0
 		extension = 0
@@ -253,14 +287,9 @@ class ServerWorker:
 		marker = 0
 		pt = 26 # MJPEG type
 		seqnum = frameNbr
-		# Repurpose SSRC as payload length so the TCP receiver can frame packets
-		# in the byte stream. UDP receivers ignore it.
-		ssrc = len(payload)
-		
+
 		rtpPacket = RtpPacket()
-		
 		rtpPacket.encode(version, padding, extension, cc, seqnum, marker, pt, ssrc, payload)
-		
 		return rtpPacket.getPacket()
 		
 	def replyRtsp(self, code, seq):

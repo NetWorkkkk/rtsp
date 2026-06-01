@@ -6,6 +6,15 @@ import io, queue
 
 from RtpPacket import RtpPacket, HEADER_SIZE as RTP_HEADER_SIZE
 
+# Tile-mode constants (must match server). SD/UDP only — each frame is
+# delivered as GRID_N x GRID_M independent JPEG tiles so that UDP packet
+# loss only blanks parts of a frame, and missing tiles can be back-filled
+# from the previously rendered frame.
+GRID_N = 8
+GRID_M = 8
+NUM_TILES = GRID_N * GRID_M
+MIN_TILES_TO_RENDER = (NUM_TILES + 1) // 2   # >= 50% threshold
+
 
 class socketBaseHandler:
 	"""Base class for media receive socket handlers."""
@@ -170,6 +179,14 @@ class Client:
 		self.paceSeq = 0
 		# Serialises writes to rtspSocket across producer/consumer/Tk threads.
 		self.rtspLock = threading.Lock()
+		# --- Tile reconstruction state (SD/UDP only) ---
+		# currentTileFrameNbr is the frame whose tiles we're presently
+		# collecting; currentTiles maps tile_idx -> JPEG bytes for it;
+		# lastTiles caches the most recently received decoded tile per
+		# position, used as fallback when a tile is missing in a new frame.
+		self.currentTileFrameNbr = -1
+		self.currentTiles = {}
+		self.lastTiles = {}
 		
 	def createWidgets(self):
 		"""Build GUI."""
@@ -390,12 +407,15 @@ class Client:
 					rtpPacket = RtpPacket()
 					rtpPacket.decode(data)
 
-					currFrameNbr = rtpPacket.seqNum()
-
-					if currFrameNbr > self.frameNbr: # Discard the late packet
-						self.frameNbr = currFrameNbr
-						self._enqueuePayload(rtpPacket.getPayload())
-						print(f"\nbuffer={self.frameBuffer.qsize()}/{self.frameBufferSize}")
+					if self.transport == "UDP":
+						# SD/UDP path: each packet is one tile of an N x M grid.
+						self._handleTilePacket(rtpPacket)
+					else:
+						# HD/TCP path: each packet is a complete MJPEG frame.
+						currFrameNbr = rtpPacket.seqNum()
+						if currFrameNbr > self.frameNbr: # Discard the late packet
+							self.frameNbr = currFrameNbr
+							self._enqueuePayload(rtpPacket.getPayload())
 			except Exception:
 				# Stop listening upon requesting PAUSE or TEARDOWN
 				if self.playEvent.isSet():
@@ -407,6 +427,71 @@ class Client:
 						self.rtpSocketHandler.destroy()
 						self.rtpSocketHandler = None
 					break
+
+	def _handleTilePacket(self, rtpPacket):
+		"""Collect tiles for one frame; close & compose when the frame turns over
+		or all tiles arrived. Late packets for older frames are discarded.
+		"""
+		frame_nbr = rtpPacket.seqNum()
+		tile_idx = rtpPacket.ssrc() & 0xFF
+
+		if frame_nbr > self.currentTileFrameNbr:
+			# A new frame has started — finalise the previous one (if any).
+			if self.currentTiles:
+				self._closeFrame()
+			self.currentTileFrameNbr = frame_nbr
+			self.currentTiles = {tile_idx: rtpPacket.getPayload()}
+		elif frame_nbr == self.currentTileFrameNbr:
+			self.currentTiles[tile_idx] = rtpPacket.getPayload()
+		else:
+			# Late packet for an already-closed frame: drop.
+			return
+
+		# Fast path: all tiles in, no need to wait for next frame to close.
+		if len(self.currentTiles) == NUM_TILES:
+			self._closeFrame()
+
+	def _closeFrame(self):
+		"""Compose the in-progress tile set into a frame and enqueue, or drop."""
+		tiles = self.currentTiles
+		self.currentTiles = {}
+		if len(tiles) < MIN_TILES_TO_RENDER:
+			return  # below 50%, frame is unusable
+		composed = self._composeFrame(tiles)
+		if composed is not None:
+			self._enqueuePayload(composed)
+
+	def _composeFrame(self, tiles):
+		"""Build a full-frame PIL Image from received tiles, filling missing
+		positions from lastTiles or with black.
+		"""
+		decoded = {}
+		for idx, jpg in tiles.items():
+			try:
+				decoded[idx] = Image.open(io.BytesIO(jpg)).convert("RGB")
+			except Exception:
+				continue
+		if not decoded:
+			return None
+		sample = next(iter(decoded.values()))
+		tile_w, tile_h = sample.size
+		canvas = Image.new("RGB", (tile_w * GRID_N, tile_h * GRID_M), (0, 0, 0))
+		for idx in range(NUM_TILES):
+			col = idx % GRID_N
+			row = idx // GRID_N
+			pos = (col * tile_w, row * tile_h)
+			if idx in decoded:
+				tile_img = decoded[idx]
+				# Refresh fallback only with freshly received tiles, never
+				# with previously-borrowed ones — otherwise stale tiles would
+				# propagate forever.
+				self.lastTiles[idx] = tile_img
+			elif idx in self.lastTiles:
+				tile_img = self.lastTiles[idx]
+			else:
+				continue  # leave black
+			canvas.paste(tile_img, pos)
+		return canvas
 
 	def _enqueuePayload(self, payload):
 		"""Block producer when the buffer is full; bail out on stop signals."""
@@ -452,9 +537,16 @@ class Client:
 		self.master.after(self.renderTickMs, self._renderTick)
 
 	def updateMovie(self, payload):
-		"""Render an RTP JPEG payload directly from memory into the GUI."""
-		photo = ImageTk.PhotoImage(Image.open(io.BytesIO(payload)))
-		self.label.configure(image = photo, height=288)
+		"""Render a queued frame into the GUI. Accepts either a JPEG byte
+		string (HD/TCP whole-frame path) or a pre-composed PIL Image
+		(SD/UDP tile-reconstruction path).
+		"""
+		if isinstance(payload, (bytes, bytearray)):
+			img = Image.open(io.BytesIO(payload))
+		else:
+			img = payload
+		photo = ImageTk.PhotoImage(img)
+		self.label.configure(image=photo, height=288)
 		self.label.image = photo
 		
 	def connectToServer(self):
@@ -622,6 +714,11 @@ class Client:
 			self.rtpSocketHandler = None
 		self.rtpSocketHandler = socketTCPHandler() if self.transport == "TCP" else socketUDPHandler()
 		self.rtpSocketHandler.initSocket(self.rtpPort)
+		# Drop any in-progress tile assembly so a transport switch doesn't
+		# carry partial state into the new session. lastTiles is kept
+		# intentionally so it can still back-fill the first new SD frame.
+		self.currentTileFrameNbr = -1
+		self.currentTiles = {}
 
 	def handler(self):
 		"""Handler on explicitly closing the GUI window."""
