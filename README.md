@@ -114,7 +114,7 @@ The client maintains the three RTSP states required by the lab:
                  |                |
                  +------ PAUSE ---+
 
-  TEARDOWN closes the session and returns the client to INIT.
+  TEARDOWN closes the session and exit the client (not return to INIT).
 ```
 
 The client creates RTSP requests in `sendRtspRequest()` in `Client.py`. Each request includes a `CSeq` header, and all requests after `SETUP` include the `Session` header returned by the server.
@@ -422,7 +422,7 @@ python3 utils/ConvertVideo.py --mode mp4_to_mjpeg_480p \
   --input source.mp4 --output SD_movie.Mjpeg --quality 25
 ```
 
-This copy-based shortcut is only for testing startup and RTSP/RTP behavior; it does not demonstrate true HD/SD quality difference.
+This copy-based shortcut is only for testing startup and RTSP/RTP behavior; it does not demonstrate true HD/SD quality difference. The quality parameters for JPEG compression should be at most 27. Otherwise, the total bytes of each frame will exceed 5 digits integer, breaking the custom MJPEG design.
 
 ### Start the server
 
