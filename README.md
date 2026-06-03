@@ -505,7 +505,7 @@ processing SETUP
 ---
 
 ## 7. Demo Video
-Our demo video is on Youtube: [video link](https://youtu.be/dQw4w9WgXcQ)
+Our demo video is on Youtube: [video link](https://youtu.be/ut_8GKqOnmw)
 
 ---
 
