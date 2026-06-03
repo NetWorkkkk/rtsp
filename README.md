@@ -1,8 +1,8 @@
 # RTSP/RTP Video Streaming - Lab Report
-**Student:**
-1. 23120004 - Nguyễn Trọng Doanh
-1. 23120052 - Nguyễn Lê Khánh
-1. 23120054 - Trần Đăng Khoa
+**Students:**
+* 23120004 - Nguyễn Trọng Doanh
+* 23120052 - Nguyễn Lê Khánh
+* 23120054 - Trần Đăng Khoa
 
 ---
 
@@ -19,7 +19,7 @@
    - 4.5 [Client-Side Caching and SD/HD Switching](#45-client-side-caching-and-sdhd-switching)
 5. [How to Run](#5-how-to-run)
 6. [Demo Screenshots](#6-demo-screenshots)
-7. [Testing and Validation](#7-testing-and-validation)
+7. [Demo Video](#7-demo-video)
 8. [Conclusion](#8-conclusion)
 
 ---
@@ -213,7 +213,7 @@ Missing tile handling:
 - If a tile was received for the current frame, it is decoded and pasted into the canvas.
 - If a tile is missing but was received in a previous frame, `lastTiles` is used as a fallback.
 - If no previous tile exists, that grid position remains black.
-- Frames with fewer than `MIN_TILES_TO_RENDER = 48` tiles are dropped as too incomplete.
+- Frames with fewer than `MIN_TILES_TO_RENDER = 32` tiles are dropped as too incomplete.
 
 This gives graceful degradation under packet loss: instead of losing an entire frame, the client can reuse old tiles only where packets were missing.
 
@@ -463,15 +463,15 @@ This section is reserved for demo images and screenshots. Replace the placeholde
 
 The RTSP server running and listening for client connections.
 
-The RTSP client runs and user click `SETUP`.
+The RTSP client runs and user clicks `SETUP`.
 
 ![Client gui startup demo](images/demo-01a-client-gui-startup.png)
 
-![Server and client cli startup demo](images/demo-01b-client-cli-startup.png)
+![Server and client cli startup](images/demo-01b-client-cli-startup.png)
 
 ### 6.2 SD Streaming over UDP
 
-The frame is split into UDP/RTP tiles and reconstructed on the client side. If some tiles don't arrive before render time, we use the previous tile to fill it, so there are some glitches.
+The frame is split into UDP/RTP tiles and reconstructed on the client side. If some tiles don't arrive before render time, we use tiles from the previous frame to fill them, so there are some glitches.
 
 ![SD UDP streaming demo](images/demo-03-sd-udp-streaming.png)
 
@@ -481,10 +481,7 @@ Full MJPEG frames are transported over the TCP media path.
 
 ![HD TCP streaming demo](images/demo-04-hd-tcp-streaming.png)
 
-
 ### 6.4 SD/HD Switching and Buffering
-
-Add screenshots showing quality switching during playback and, if available, buffer or flow-control logs such as `PACE PAUSE` and `PACE RESUME`.
 
 Switch from SD to HD (UDP to TCP):
 
@@ -507,21 +504,8 @@ processing SETUP
 
 ---
 
-## 7. Testing and Validation
-
-The following test cases were used to verify the implementation against the assignment requirements.
-
-| Requirement | Test | Expected result |
-|-------------|------|-----------------|
-| RTSP client protocol | Click `Setup -> Play -> Pause -> Teardown`. | Client sends valid RTSP requests with increasing `CSeq`; server replies `200 OK`; client state changes correctly. |
-| RTP packetization | Start streaming and decode packets on the client. | RTP version is 2, payload type is 26, sequence numbers increase with frame number, and payload renders as MJPEG. |
-| UDP fragmentation | Run SD mode. | Server sends 64 RTP/UDP tile packets per frame; client reconstructs frames from tiles. |
-| Packet-loss concealment | Drop or delay some UDP packets during SD mode. | Missing tiles are filled from previous tiles when available; incomplete frames below the threshold are dropped. |
-| I/O multiplexing | Start more than one client against the same server. | Server accepts multiple RTSP clients through the `epoll` loop instead of blocking at the first connection. |
-| HD over TCP | Select HD mode and play. | Client receives full-frame RTP packets over TCP and reconstructs packet boundaries using the payload length convention. |
-| Client-side caching | Start playback after `PLAY`. | Rendering begins after pre-roll; buffer smooths short arrival jitter. |
-| SD/HD switching | Change the radio button during playback. | Client sends a new `SETUP`; server switches transport/profile and synchronizes stream frame indexes. |
-| Flow control | Let the buffer approach the high-water mark. | Client sends `PACE PAUSE`; server pauses RTP sending until `PACE RESUME`. |
+## 7. Demo Video
+Our demo video is on Youtube: [video link](https://youtu.be/dQw4w9WgXcQ)
 
 ---
 
