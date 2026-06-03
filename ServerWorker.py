@@ -296,10 +296,14 @@ class ServerWorker:
 	def sendRtp(self):
 		"""Send RTP packets to the client."""
 		while True:
-			self.clientInfo['event'].wait(0.05)
+			event = self.clientInfo.get('event')
+			if event is None:
+				break
+			event.wait(0.05)
 
 			# Stop sending if request is PAUSE or TEARDOWN
-			if self.clientInfo['event'].isSet():
+			event = self.clientInfo.get('event')
+			if event is None or event.isSet():
 				break
 
 			# Honour client-driven flow control. Wait with a timeout so the
