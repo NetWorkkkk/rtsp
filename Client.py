@@ -207,6 +207,7 @@ class Client:
 		warn = "#bb3e03"
 
 		self.master.configure(bg=bg_main, padx=12, pady=12)
+		self.master.geometry("960x600")
 		self.master.grid_rowconfigure(0, weight=1)
 		self.master.grid_columnconfigure(0, weight=1)
 
@@ -215,6 +216,11 @@ class Client:
 		self.videoFrame.grid(row=0, column=0, sticky=N+S+E+W)
 		self.videoFrame.grid_rowconfigure(0, weight=1)
 		self.videoFrame.grid_columnconfigure(0, weight=1)
+		# Decouple this frame from its child Label's requested pixel size.
+		# Without this, each updateMovie() configures the Label to W x H and
+		# the parents would propagate that upward, growing the toplevel
+		# unboundedly tick by tick.
+		self.videoFrame.grid_propagate(False)
 
 		self.label = Label(
 			self.videoFrame,
